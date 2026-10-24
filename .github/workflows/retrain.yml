@@ -1,0 +1,100 @@
+name: Retrain Models
+
+on:
+  # Retrain automatically whenever the dataset changes
+  push:
+    branches: [ main ]
+    paths:
+      - 'data/used_cars_v2.csv'
+  # Also retrain on a schedule as a freshness safety net (every Monday 03:00 UTC)
+  schedule:
+    - cron: '0 3 * * 1'
+  # Allow manual trigger from the Actions tab
+  workflow_dispatch: {}
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run pre-training test suite
+        run: pytest tests/ -v
+
+      - name: Save the currently-deployed metrics for comparison
+        run: |
+          mkdir -p /tmp/previous_metrics
+          cp models/price_predictor_metrics.json /tmp/previous_metrics/old_metrics.json 2>/dev/null \
+            && echo "Found previously deployed metrics." \
+            || echo "No previous metrics on record (first run)."
+
+      - name: Train recommendation model
+        run: python src/train_models.py
+
+      - name: Train price predictor model
+        run: python src/train_predictor.py
+
+      - name: Validate newly trained models
+        run: |
+          python - <<'EOF'
+          import sys
+          sys.path.insert(0, 'src')
+          from price_prediction import PricePredictor
+          from recommendation_system import CarRecommendationSystem
+
+          # Price predictor must load and produce a sane, positive prediction
+          predictor = PricePredictor.load_model('models/price_predictor_model.pkl')
+          price = predictor.predict({
+              'Brand': 'Maruti', 'Model': 'Swift', 'Year': 2018,
+              'Kilometers_Driven': 30000, 'Fuel_Type': 'Petrol',
+              'Transmission': 'Manual', 'Owner_Type': 'First',
+              'Location': 'Mumbai', 'Mileage': 20.0, 'Engine': 1200,
+              'Power': 85, 'Seats': 5, 'Safety_Rating': 3.0,
+              'Condition_Grade': 'B'
+          })
+          assert 0 < price < 500, f"Suspicious predicted price: {price}"
+          print(f"Predictor validation OK: sample prediction = {price:.2f} Lakhs")
+
+          # Recommendation system must load and return recommendations
+          system = CarRecommendationSystem.load_model('models/car_model.pkl')
+          recs = system.recommend_by_preferences({'budget': 15}, n_recommendations=5)
+          assert len(recs) > 0, "Recommendation system returned no results for a broad query"
+          print(f"Recommendation system validation OK: {len(recs)} recs returned")
+          EOF
+
+      - name: Only deploy the price predictor if it actually improved
+        id: gate
+        run: |
+          if python src/compare_metrics.py /tmp/previous_metrics/old_metrics.json models/price_predictor_metrics.json; then
+            echo "deploy_predictor=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy_predictor=false" >> "$GITHUB_OUTPUT"
+            echo "Reverting price predictor to the previously deployed version."
+            git checkout -- models/price_predictor_model.pkl models/price_predictor_metrics.json 2>/dev/null || true
+          fi
+
+      - name: Commit updated models
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add models/car_model.pkl
+          if [ "${{ steps.gate.outputs.deploy_predictor }}" = "true" ]; then
+            git add models/price_predictor_model.pkl models/price_predictor_metrics.json
+          fi
+          git diff --cached --quiet && echo "No model changes to commit" || git commit -m "chore: automated model retraining [skip ci]"
+          git push

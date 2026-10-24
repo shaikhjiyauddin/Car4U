@@ -1,0 +1,18 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    restart: unless-stopped
+
+  # Run this on demand to retrain without rebuilding the whole image:
+  #   docker compose run --rm retrain
+  retrain:
+    build: .
+    entrypoint: ["sh", "-c", "python src/train_models.py && python src/train_predictor.py"]
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models

@@ -26,6 +26,10 @@ desktop.ini
 # SQLite database (contains user data — do NOT commit)
 data/car4u.db
 
+# Trained model files (regenerate with train_models.py / train_predictor.py)
+models/*.pkl
+models/*.json
+
 # Coverage
 .coverage
 htmlcov/
